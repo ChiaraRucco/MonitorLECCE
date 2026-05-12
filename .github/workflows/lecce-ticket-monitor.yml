@@ -1,0 +1,102 @@
+name: US Lecce Ticket Monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install Python packages
+        run: pip install requests beautifulsoup4
+
+      - name: Run monitor
+        env:
+          PAGE_URL: ${{ secrets.PAGE_URL }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          python <<EOF
+          import os
+          import json
+          import smtplib
+          import requests
+          from bs4 import BeautifulSoup
+          from email.mime.text import MIMEText
+
+          URL = os.environ["PAGE_URL"]
+
+          response = requests.get(URL, timeout=30)
+          soup = BeautifulSoup(response.text, "html.parser")
+
+          # Extract ticket-related text
+          text = soup.get_text(" ", strip=True)
+
+          keywords = [
+              "acquista",
+              "buy",
+              "biglietti",
+              "tickets",
+              "disponibile",
+              "available"
+          ]
+
+          found = any(k.lower() in text.lower() for k in keywords)
+
+          state_file = "last_state.json"
+
+          previous = {"found": False}
+
+          if os.path.exists(state_file):
+              with open(state_file, "r") as f:
+                  previous = json.load(f)
+
+          # Trigger only on new availability
+          if found and not previous["found"]:
+
+              body = f"""
+              Tickets may now be available!
+
+              Check:
+              {URL}
+              """
+
+              msg = MIMEText(body)
+
+              msg["Subject"] = "US Lecce Tickets Alert"
+              msg["From"] = os.environ["EMAIL_USER"]
+              msg["To"] = os.environ["EMAIL_TO"]
+
+              with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                  server.starttls()
+                  server.login(
+                      os.environ["EMAIL_USER"],
+                      os.environ["EMAIL_PASS"]
+                  )
+                  server.send_message(msg)
+
+              print("EMAIL SENT")
+
+          else:
+              print("No new ticket availability")
+
+          with open(state_file, "w") as f:
+              json.dump({"found": found}, f)
+
+          EOF
+
+      - name: Commit state
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add last_state.json || true
+          git commit -m "Update monitor state" || echo "Nothing to commit"
+          git push
